@@ -1,0 +1,1832 @@
+-- ULTIMATE TRADER v8.0 - ПОЛНОСТЬЮ ОБУЧЕННЫЙ СКРИПТ С ЯДРОМ
+-- С ИНВОК СЕРВЕРОМ, ОБРАБОТЧИКАМИ, ТАБЛИЦАМИ, АНАЛИЗОМ И ПОДСЧЕТАМИ
+-- ДЛЯ ИНЖЕКТОРА DELTA
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local StarterGui = game:GetService("StarterGui")
+local HttpService = game:GetService("HttpService")
+local Workspace = game:GetService("Workspace")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local Info = require(ReplicatedStorage:WaitForChild("Info"))
+local Events = ReplicatedStorage:WaitForChild("Events")
+local Handler = require(ReplicatedStorage:FindFirstChild("Handler") or ReplicatedStorage:WaitForChild("OldHandler"))
+local Sounds = ReplicatedStorage:FindFirstChild("Sounds")
+
+local BACKGROUND_ID = "135730318591850"
+
+-- ============================================================================
+-- ТАБЛИЦЫ ДЛЯ ИНЖЕКТОРА (СОЗДАЮТСЯ И СОХРАНЯЮТСЯ)
+-- ============================================================================
+local DataTables = {
+    marketData = {},
+    priceHistory = {},
+    tradeHistory = {},
+    userSettings = {},
+    stats = {},
+    analyzedData = {},
+    predictions = {},
+    learningData = {}
+}
+
+-- Функция сохранения таблиц
+local function saveData()
+    local dataString = HttpService:JSONEncode(DataTables)
+    -- Сохраняем в Synapse или других инжекторах
+    if syn and syn.writefile then
+        syn.writefile("UltimateTrader_Data.json", dataString)
+    elseif writefile then
+        writefile("UltimateTrader_Data.json", dataString)
+    end
+end
+
+-- Функция загрузки таблиц
+local function loadData()
+    if syn and syn.readfile then
+        local data = syn.readfile("UltimateTrader_Data.json")
+        if data and data ~= "" then
+            DataTables = HttpService:JSONDecode(data)
+        end
+    elseif readfile then
+        local data = readfile("UltimateTrader_Data.json")
+        if data and data ~= "" then
+            DataTables = HttpService:JSONDecode(data)
+        end
+    end
+end
+
+loadData()
+
+-- ============================================================================
+-- ЯДРО СКРИПТА (ОБУЧЕННОЕ)
+-- ============================================================================
+local Core = {}
+Core.__index = Core
+
+function Core.new()
+    local self = setmetatable({}, Core)
+    
+    self.state = {
+        currentCurrency = "_StarsValue",
+        isAutoBuyActive = false,
+        isFlipperActive = false,
+        isScanning = false,
+        isRunning = false,
+        autoBuyTask = nil,
+        flipperTask = nil,
+        scanTask = nil,
+        marketCache = {},
+        inventoryCache = {},
+        priceHistory = DataTables.priceHistory or {},
+        stats = DataTables.stats or {
+            totalBuys = 0,
+            totalSells = 0,
+            profit = 0,
+            failedAttempts = 0,
+            startTime = os.time(),
+            successfulTrades = 0,
+            totalTrades = 0,
+            profitHistory = {},
+            bestTrade = 0,
+            worstTrade = 0,
+            averageProfit = 0
+        },
+        updateInterval = 1.5,
+        lastUpdate = 0,
+        lastScan = 0,
+        connections = {},
+        isLearning = true,
+        learningThreshold = 0.85
+    }
+    
+    self.cache = {
+        gifts = {},
+        marketFolders = {},
+        currencySymbols = {
+            _StarsValue = "⭐",
+            _GemsValue = "💎",
+            _TONValue = "💠"
+        }
+    }
+    
+    self.analytics = {
+        marketTrends = {},
+        pricePatterns = {},
+        bestTimes = {},
+        successfulPatterns = {},
+        failedPatterns = {}
+    }
+    
+    self:initCache()
+    self:setupOptimization()
+    self:setupEventHandlers()
+    self:setupLearningSystem()
+    
+    return self
+end
+
+function Core:initCache()
+    if Info and Info.Gifts then
+        for name, data in pairs(Info.Gifts) do
+            if not data.Hidden then
+                self.cache.gifts[name] = data
+            end
+        end
+    end
+    
+    local market = ReplicatedStorage:FindFirstChild("Market")
+    if market then
+        for _, currency in pairs({"_StarsValue", "_GemsValue", "_TONValue"}) do
+            local folder = market:FindFirstChild(currency)
+            if folder then
+                self.cache.marketFolders[currency] = folder
+            end
+        end
+    end
+end
+
+function Core:setupLearningSystem()
+    self.state.connections.learningLoop = RunService.Heartbeat:Connect(function()
+        if self.state.isLearning then
+            self:analyzeAndLearn()
+        end
+    end)
+end
+
+function Core:analyzeAndLearn()
+    -- Анализ текущего рынка
+    for currency, cache in pairs(self.state.marketCache) do
+        for name, item in pairs(cache) do
+            -- Собираем данные о ценах
+            if not DataTables.marketData[name] then
+                DataTables.marketData[name] = {
+                    prices = {},
+                    timestamps = {},
+                    currency = currency,
+                    minPrice = math.huge,
+                    maxPrice = 0,
+                    averagePrice = 0,
+                    volatility = 0,
+                    trend = "stable"
+                }
+            end
+            
+            local data = DataTables.marketData[name]
+            table.insert(data.prices, item.value)
+            table.insert(data.timestamps, os.time())
+            
+            -- Обновляем статистику
+            if item.value < data.minPrice then data.minPrice = item.value end
+            if item.value > data.maxPrice then data.maxPrice = item.value end
+            
+            -- Вычисляем среднюю цену
+            local sum = 0
+            for _, v in ipairs(data.prices) do
+                sum = sum + v
+            end
+            data.averagePrice = sum / #data.prices
+            
+            -- Вычисляем волатильность
+            if #data.prices > 1 then
+                local variance = 0
+                for _, v in ipairs(data.prices) do
+                    variance = variance + (v - data.averagePrice) ^ 2
+                end
+                data.volatility = math.sqrt(variance / (#data.prices - 1))
+            end
+            
+            -- Определяем тренд
+            if #data.prices > 5 then
+                local lastPrices = {}
+                for i = #data.prices - 5, #data.prices do
+                    table.insert(lastPrices, data.prices[i])
+                end
+                local trend = 0
+                for i = 2, #lastPrices do
+                    trend = trend + (lastPrices[i] - lastPrices[i-1])
+                end
+                if trend > 0 then
+                    data.trend = "rising"
+                elseif trend < 0 then
+                    data.trend = "falling"
+                else
+                    data.trend = "stable"
+                end
+            end
+            
+            -- Прогнозируем цену
+            if #data.prices > 3 then
+                local avgChange = 0
+                for i = #data.prices - 2, #data.prices do
+                    avgChange = avgChange + (data.prices[i] - data.prices[i-1])
+                end
+                avgChange = avgChange / 3
+                data.predictedPrice = data.prices[#data.prices] + avgChange
+            else
+                data.predictedPrice = data.averagePrice
+            end
+            
+            -- Сохраняем в таблицу для инжектора
+            DataTables.analyzedData[name] = data
+        end
+    end
+    
+    saveData()
+end
+
+function Core:setupOptimization()
+    self.state.connections.heartbeat = RunService.Heartbeat:Connect(function(deltaTime)
+        self.state.lastUpdate = self.state.lastUpdate + deltaTime
+        if self.state.lastUpdate >= self.state.updateInterval then
+            self.state.lastUpdate = 0
+            self:updateMarketCache()
+        end
+    end)
+    
+    self.state.connections.renderStepped = RunService.RenderStepped:Connect(function()
+        if self.state.isAutoBuyActive or self.state.isFlipperActive then
+            self:fastScan()
+        end
+    end)
+end
+
+function Core:setupEventHandlers()
+    for currency, folder in pairs(self.cache.marketFolders) do
+        local connAdd = folder.DescendantAdded:Connect(function(item)
+            if item:IsA("IntValue") then
+                self:onMarketItemAdded(currency, item)
+            end
+        end)
+        local connRem = folder.DescendantRemoved:Connect(function(item)
+            if item:IsA("IntValue") then
+                self:onMarketItemRemoved(currency, item)
+            end
+        end)
+        table.insert(self.state.connections, connAdd)
+        table.insert(self.state.connections, connRem)
+    end
+    
+    local inventory = player:FindFirstChild("_Inventory")
+    if inventory then
+        local connInv = inventory.DescendantAdded:Connect(function(item)
+            if item:IsA("IntValue") then
+                self.state.inventoryCache[item.Name] = {value = item.Value, ref = item}
+            end
+        end)
+        table.insert(self.state.connections, connInv)
+        local connInvRem = inventory.DescendantRemoved:Connect(function(item)
+            if item:IsA("IntValue") then
+                self.state.inventoryCache[item.Name] = nil
+            end
+        end)
+        table.insert(self.state.connections, connInvRem)
+    end
+end
+
+function Core:fastScan()
+    local currency = self.state.currentCurrency
+    local folder = self.cache.marketFolders[currency]
+    if not folder then return end
+    
+    if not self.state.marketCache[currency] then
+        self.state.marketCache[currency] = {}
+    end
+    local cache = self.state.marketCache[currency]
+    
+    for _, item in pairs(folder:GetChildren()) do
+        if item:IsA("IntValue") then
+            local existing = cache[item.Name]
+            if not existing or existing.value ~= item.Value or existing.owner ~= item:GetAttribute("Owner") then
+                cache[item.Name] = {
+                    value = item.Value,
+                    ref = item,
+                    owner = item:GetAttribute("Owner"),
+                    timestamp = os.time()
+                }
+            end
+        end
+    end
+end
+
+function Core:updateMarketCache()
+    for currency, folder in pairs(self.cache.marketFolders) do
+        if not self.state.marketCache[currency] then
+            self.state.marketCache[currency] = {}
+        end
+        local cache = self.state.marketCache[currency]
+        for _, item in pairs(folder:GetChildren()) do
+            if item:IsA("IntValue") then
+                cache[item.Name] = {
+                    value = item.Value,
+                    ref = item,
+                    owner = item:GetAttribute("Owner"),
+                    timestamp = os.time()
+                }
+            end
+        end
+    end
+end
+
+function Core:onMarketItemAdded(currency, item)
+    if not self.state.marketCache[currency] then
+        self.state.marketCache[currency] = {}
+    end
+    self.state.marketCache[currency][item.Name] = {
+        value = item.Value,
+        ref = item,
+        owner = item:GetAttribute("Owner"),
+        timestamp = os.time()
+    }
+    
+    -- Записываем в историю
+    if not DataTables.priceHistory[item.Name] then
+        DataTables.priceHistory[item.Name] = {}
+    end
+    table.insert(DataTables.priceHistory[item.Name], {
+        price = item.Value,
+        currency = currency,
+        timestamp = os.time()
+    })
+    
+    if self.state.isAutoBuyActive then
+        self:processAutoBuyCheck(currency, item)
+    end
+    if self.state.isFlipperActive then
+        self:processFlipperCheck(currency, item)
+    end
+end
+
+function Core:onMarketItemRemoved(currency, item)
+    if self.state.marketCache[currency] then
+        self.state.marketCache[currency][item.Name] = nil
+    end
+end
+
+-- ============================================================================
+-- ИНВОК СЕРВЕР (ОБРАБОТЧИКИ)
+-- ============================================================================
+function Core:invokeServer(action, ...)
+    local success, result = pcall(function()
+        return Events.Market:InvokeServer(action, ...)
+    end)
+    
+    -- Записываем в логи
+    if not DataTables.tradeHistory then
+        DataTables.tradeHistory = {}
+    end
+    table.insert(DataTables.tradeHistory, {
+        action = action,
+        success = success,
+        timestamp = os.time(),
+        result = result
+    })
+    
+    saveData()
+    return success, result
+end
+
+function Core:buyItem(itemRef)
+    local success, result = self:invokeServer("Buy", itemRef)
+    if success and result and result[1] then
+        self.state.stats.totalBuys = self.state.stats.totalBuys + 1
+        self.state.stats.successfulTrades = self.state.stats.successfulTrades + 1
+        self.state.stats.totalTrades = self.state.stats.totalTrades + 1
+        saveData()
+    end
+    return success, result
+end
+
+function Core:placeOffer(name, currencyTable)
+    local success, result = self:invokeServer("PlaceOffer", name, currencyTable)
+    if success then
+        self.state.stats.totalSells = self.state.stats.totalSells + 1
+        saveData()
+    end
+    return success, result
+end
+
+function Core:notify(title, text, sound)
+    pcall(function()
+        if Handler and Handler.Notify then
+            Handler.Notify(title or "Trader", text or "", sound or nil)
+        else
+            StarterGui:SetCore("SendNotification", {
+                Title = title or "Trader",
+                Text = text or "",
+                Duration = 3
+            })
+        end
+    end)
+end
+
+function Core:processAutoBuyCheck(currency, item)
+    -- Обработчик для авто-закупа
+end
+
+function Core:processFlipperCheck(currency, item)
+    -- Обработчик для флиппера
+end
+
+-- ============================================================================
+-- АНАЛИЗАТОР РЫНКА (РАСЧЕТЫ И ПОДСЧЕТЫ)
+-- ============================================================================
+local Analyzer = {}
+Analyzer.__index = Analyzer
+
+function Analyzer.new(core)
+    local self = setmetatable({}, Analyzer)
+    self.core = core
+    self.data = {}
+    self.isScanning = false
+    self.lastScan = 0
+    self.analysisResults = {}
+    return self
+end
+
+function Analyzer:scan()
+    if self.isScanning then return end
+    self.isScanning = true
+    
+    local result = {}
+    for currency, folder in pairs(self.core.cache.marketFolders) do
+        local items = {}
+        for _, item in pairs(folder:GetChildren()) do
+            if item:IsA("IntValue") then
+                local name = item.Name
+                if not items[name] then
+                    items[name] = {
+                        prices = {},
+                        min = math.huge,
+                        max = 0,
+                        sum = 0,
+                        count = 0,
+                        owners = {},
+                        timestamps = {}
+                    }
+                end
+                local data = items[name]
+                table.insert(data.prices, item.Value)
+                data.sum = data.sum + item.Value
+                data.count = data.count + 1
+                if item.Value < data.min then data.min = item.Value end
+                if item.Value > data.max then data.max = item.Value end
+                local owner = item:GetAttribute("Owner")
+                if owner then
+                    data.owners[owner] = (data.owners[owner] or 0) + 1
+                end
+                table.insert(data.timestamps, os.time())
+            end
+        end
+        
+        for name, data in pairs(items) do
+            if data.count > 0 then
+                data.average = data.sum / data.count
+                data.median = self:calculateMedian(data.prices)
+                data.standardDeviation = self:calculateStdDev(data.prices, data.average)
+                data.recommendedSell = math.floor(data.average * 1.15)
+                data.recommendedBuy = math.floor(data.average * 0.85)
+                data.discount = 1 - (data.min / data.average)
+                data.volatility = data.max - data.min
+                data.currency = currency
+                
+                -- Анализ тренда
+                data.trend = self:analyzeTrend(data.prices)
+                
+                -- Прогноз
+                data.prediction = self:predictPrice(data.prices)
+                
+                -- Оценка ликвидности
+                data.liquidity = data.count / #folder:GetChildren() * 100
+                
+                -- Рейтинг
+                data.rating = self:calculateRating(data)
+            end
+        end
+        
+        result[currency] = items
+    end
+    
+    self.data = result
+    self.isScanning = false
+    self.lastScan = os.time()
+    self.analysisResults = result
+    DataTables.analyzedData = result
+    saveData()
+    
+    return result
+end
+
+function Analyzer:calculateMedian(prices)
+    local sorted = {}
+    for _, v in ipairs(prices) do
+        table.insert(sorted, v)
+    end
+    table.sort(sorted)
+    local len = #sorted
+    if len == 0 then return 0 end
+    if len % 2 == 1 then
+        return sorted[math.floor(len/2) + 1]
+    else
+        return (sorted[len/2] + sorted[len/2 + 1]) / 2
+    end
+end
+
+function Analyzer:calculateStdDev(prices, average)
+    if #prices <= 1 then return 0 end
+    local sum = 0
+    for _, v in ipairs(prices) do
+        sum = sum + (v - average) ^ 2
+    end
+    return math.sqrt(sum / (#prices - 1))
+end
+
+function Analyzer:analyzeTrend(prices)
+    if #prices < 3 then return "insufficient" end
+    local trend = 0
+    for i = 2, #prices do
+        trend = trend + (prices[i] - prices[i-1])
+    end
+    trend = trend / (#prices - 1)
+    if trend > 0.05 then return "rising"
+    elseif trend < -0.05 then return "falling"
+    else return "stable" end
+end
+
+function Analyzer:predictPrice(prices)
+    if #prices < 3 then return prices[#prices] or 0 end
+    local weights = {0.5, 0.3, 0.2}
+    local prediction = 0
+    for i = 1, math.min(3, #prices) do
+        prediction = prediction + prices[#prices - i + 1] * weights[i]
+    end
+    return math.floor(prediction)
+end
+
+function Analyzer:calculateRating(data)
+    local rating = 0
+    -- Ликвидность
+    if data.liquidity > 50 then rating = rating + 30
+    elseif data.liquidity > 20 then rating = rating + 20
+    else rating = rating + 10 end
+    
+    -- Скидка
+    if data.discount > 0.3 then rating = rating + 30
+    elseif data.discount > 0.15 then rating = rating + 20
+    else rating = rating + 10 end
+    
+    -- Волатильность
+    if data.volatility < 100 then rating = rating + 20
+    elseif data.volatility < 500 then rating = rating + 10
+    else rating = rating + 5 end
+    
+    -- Тренд
+    if data.trend == "rising" then rating = rating + 20
+    elseif data.trend == "stable" then rating = rating + 10
+    else rating = rating + 5 end
+    
+    return math.min(rating, 100)
+end
+
+function Analyzer:getDeals(currency, limit)
+    limit = limit or 20
+    local deals = {}
+    local data = self.data[currency]
+    if not data then return deals end
+    
+    for name, info in pairs(data) do
+        if info.count > 1 and info.discount > 0.05 then
+            table.insert(deals, {
+                name = name,
+                min = info.min,
+                average = info.average,
+                median = info.median,
+                max = info.max,
+                discount = info.discount,
+                count = info.count,
+                volatility = info.volatility,
+                trend = info.trend,
+                prediction = info.prediction,
+                liquidity = info.liquidity,
+                rating = info.rating,
+                recommendedBuy = info.recommendedBuy,
+                recommendedSell = info.recommendedSell,
+                currency = info.currency
+            })
+        end
+    end
+    
+    table.sort(deals, function(a, b)
+        return a.rating > b.rating
+    end)
+    
+    local result = {}
+    for i = 1, math.min(limit, #deals) do
+        table.insert(result, deals[i])
+    end
+    return result
+end
+
+function Analyzer:getTopDeals(currency, minRating, limit)
+    minRating = minRating or 70
+    limit = limit or 10
+    local deals = self:getDeals(currency, 50)
+    local result = {}
+    for _, deal in ipairs(deals) do
+        if deal.rating >= minRating then
+            table.insert(result, deal)
+            if #result >= limit then break end
+        end
+    end
+    return result
+end
+
+-- ============================================================================
+-- ОБУЧЕННЫЙ БОТ (АВТО-ЗАКУП)
+-- ============================================================================
+local AutoBuy = {}
+AutoBuy.__index = AutoBuy
+
+function AutoBuy.new(core, analyzer)
+    local self = setmetatable({}, AutoBuy)
+    self.core = core
+    self.analyzer = analyzer
+    self.target = ""
+    self.maxPrice = 0
+    self.currency = "_StarsValue"
+    self.running = false
+    self.task = nil
+    self.buyCount = 0
+    self.learningData = {
+        attempts = 0,
+        successful = 0,
+        avgPrice = 0,
+        bestPrice = math.huge,
+        worstPrice = 0,
+        successRate = 0,
+        learnedPatterns = {}
+    }
+    return self
+end
+
+function AutoBuy:learn(price, success, name)
+    self.learningData.attempts = self.learningData.attempts + 1
+    if success then
+        self.learningData.successful = self.learningData.successful + 1
+        self.learningData.avgPrice = (self.learningData.avgPrice * (self.learningData.successful - 1) + price) / self.learningData.successful
+        if price < self.learningData.bestPrice then
+            self.learningData.bestPrice = price
+        end
+        if price > self.learningData.worstPrice then
+            self.learningData.worstPrice = price
+        end
+        
+        -- Запоминаем успешный паттерн
+        if not self.learningData.learnedPatterns[name] then
+            self.learningData.learnedPatterns[name] = {prices = {}, successes = 0}
+        end
+        table.insert(self.learningData.learnedPatterns[name].prices, price)
+        self.learningData.learnedPatterns[name].successes = self.learningData.learnedPatterns[name].successes + 1
+    end
+    self.learningData.successRate = self.learningData.successful / self.learningData.attempts
+    DataTables.learningData = self.learningData
+    saveData()
+end
+
+function AutoBuy:shouldBuy(name, price)
+    -- Используем обучение для принятия решения
+    local pattern = self.learningData.learnedPatterns[name]
+    if pattern and #pattern.prices > 3 then
+        local avg = 0
+        for _, v in ipairs(pattern.prices) do
+            avg = avg + v
+        end
+        avg = avg / #pattern.prices
+        -- Если цена ниже средней успешной покупки
+        if price < avg * 1.1 then
+            return true
+        end
+    end
+    return price <= self.maxPrice
+end
+
+function AutoBuy:start(target, maxPrice, currency)
+    self.target = target
+    self.maxPrice = maxPrice
+    self.currency = currency or "_StarsValue"
+    self.running = true
+    self.buyCount = 0
+    self.core.state.isAutoBuyActive = true
+    
+    self.task = RunService.Heartbeat:Connect(function()
+        if not self.running then return end
+        local cache = self.core.state.marketCache[self.currency]
+        if not cache then return end
+        local item = cache[self.target]
+        if item and not item.owner and self:shouldBuy(self.target, item.value) then
+            local ok, res = self.core:buyItem(item.ref)
+            if ok and res and res[1] then
+                self.buyCount = self.buyCount + 1
+                self.core.state.stats.totalBuys = self.core.state.stats.totalBuys + 1
+                self:learn(item.value, true, self.target)
+                self.core:notify(
+                    "Auto-Buy",
+                    string.format("Куплен %s за %s %s (Обучение: %d%% успеха)", 
+                        self.target, 
+                        self.core.cache.currencySymbols[self.currency],
+                        tostring(item.value),
+                        math.floor(self.learningData.successRate * 100)
+                    )
+                )
+                self:stop()
+            else
+                self.core.state.stats.failedAttempts = self.core.state.stats.failedAttempts + 1
+                self:learn(item.value, false, self.target)
+            end
+        end
+    end)
+end
+
+function AutoBuy:stop()
+    self.running = false
+    self.core.state.isAutoBuyActive = false
+    if self.task then
+        self.task:Disconnect()
+        self.task = nil
+    end
+end
+
+function AutoBuy:getStatus()
+    return {
+        running = self.running,
+        target = self.target,
+        maxPrice = self.maxPrice,
+        buys = self.buyCount,
+        learning = self.learningData
+    }
+end
+
+-- ============================================================================
+-- ОБУЧЕННЫЙ БОТ (ФЛИППЕР)
+-- ============================================================================
+local Flipper = {}
+Flipper.__index = Flipper
+
+function Flipper.new(core, analyzer)
+    local self = setmetatable({}, Flipper)
+    self.core = core
+    self.analyzer = analyzer
+    self.settings = {}
+    self.running = false
+    self.task = nil
+    self.currency = "_StarsValue"
+    self.profitHistory = DataTables.tradeHistory or {}
+    self.tradeCount = 0
+    self.successRate = 0
+    self.learningData = {
+        buyPatterns = {},
+        sellPatterns = {},
+        profitablePairs = {},
+        avgProfit = 0,
+        totalTrades = 0,
+        successfulTrades = 0
+    }
+    return self
+end
+
+function Flipper:learn(name, buyPrice, sellPrice, success)
+    self.learningData.totalTrades = self.learningData.totalTrades + 1
+    if success then
+        self.learningData.successfulTrades = self.learningData.successfulTrades + 1
+        local profit = sellPrice - buyPrice
+        self.learningData.avgProfit = (self.learningData.avgProfit * (self.learningData.successfulTrades - 1) + profit) / self.learningData.successfulTrades
+        
+        if not self.learningData.profitablePairs[name] then
+            self.learningData.profitablePairs[name] = {profits = {}, count = 0}
+        end
+        table.insert(self.learningData.profitablePairs[name].profits, profit)
+        self.learningData.profitablePairs[name].count = self.learningData.profitablePairs[name].count + 1
+    end
+    self.successRate = self.learningData.successfulTrades / self.learningData.totalTrades
+    DataTables.learningData = self.learningData
+    saveData()
+end
+
+function Flipper:addSettings(name, buyMax, sellPrice)
+    -- Проверяем, есть ли в анализе подсказки
+    local analysis = self.analyzer.data[self.currency]
+    if analysis and analysis[name] then
+        local data = analysis[name]
+        -- Корректируем цены на основе анализа
+        if buyMax > data.recommendedBuy and data.discount > 0.1 then
+            buyMax = math.min(buyMax, data.recommendedBuy * 1.1)
+        end
+        if sellPrice < data.recommendedSell and data.trend == "rising" then
+            sellPrice = math.max(sellPrice, data.recommendedSell * 0.9)
+        end
+    end
+    
+    self.settings[name] = {
+        buyMax = buyMax,
+        sellPrice = sellPrice,
+        lastBuy = 0,
+        lastSell = 0,
+        attempts = 0,
+        successes = 0,
+        totalProfit = 0
+    }
+end
+
+function Flipper:start(currency)
+    self.currency = currency or "_StarsValue"
+    self.running = true
+    self.core.state.isFlipperActive = true
+    
+    self.task = RunService.Heartbeat:Connect(function()
+        if not self.running then return end
+        local cache = self.core.state.marketCache[self.currency]
+        if not cache then return end
+        
+        for name, settings in pairs(self.settings) do
+            if settings.buyMax and settings.buyMax > 0 then
+                local item = cache[name]
+                if item and item.value <= settings.buyMax and not item.owner then
+                    -- Проверяем, не слишком ли быстро мы покупаем
+                    local timeSinceLastBuy = os.time() - settings.lastBuy
+                    if timeSinceLastBuy > 5 then
+                        local ok, res = self.core:buyItem(item.ref)
+                        if ok and res and res[1] then
+                            settings.lastBuy = os.time()
+                            self.core.state.stats.totalBuys = self.core.state.stats.totalBuys + 1
+                            
+                            if settings.sellPrice and settings.sellPrice > 0 then
+                                local currencyTable = {}
+                                currencyTable[self.currency] = settings.sellPrice
+                                local placeSuccess = self.core:placeOffer(name, currencyTable)
+                                if placeSuccess then
+                                    settings.lastSell = os.time()
+                                    self.core.state.stats.totalSells = self.core.state.stats.totalSells + 1
+                                    local profit = settings.sellPrice - item.value
+                                    self.core.state.stats.profit = self.core.state.stats.profit + profit
+                                    settings.totalProfit = settings.totalProfit + profit
+                                    settings.successes = settings.successes + 1
+                                    
+                                    self:learn(name, item.value, settings.sellPrice, true)
+                                    
+                                    self.core:notify(
+                                        "Flipper",
+                                        string.format("Перекуплен %s: куплен за %s, продан за %s, прибыль %s (Успех: %d%%)",
+                                            name,
+                                            tostring(item.value),
+                                            tostring(settings.sellPrice),
+                                            tostring(profit),
+                                            math.floor(self.successRate * 100)
+                                        )
+                                    )
+                                else
+                                    self:learn(name, item.value, settings.sellPrice, false)
+                                end
+                            end
+                        end
+                        settings.attempts = settings.attempts + 1
+                    end
+                end
+            end
+        end
+    end)
+end
+
+function Flipper:stop()
+    self.running = false
+    self.core.state.isFlipperActive = false
+    if self.task then
+        self.task:Disconnect()
+        self.task = nil
+    end
+end
+
+function Flipper:getStatus()
+    return {
+        running = self.running,
+        currency = self.currency,
+        settings = self.settings,
+        totalBuys = self.core.state.stats.totalBuys,
+        totalSells = self.core.state.stats.totalSells,
+        profit = self.core.state.stats.profit,
+        successRate = self.successRate,
+        learningData = self.learningData
+    }
+end
+
+-- ============================================================================
+-- СОЗДАНИЕ GUI С ПОЛНЫМ ИНТЕРФЕЙСОМ
+-- ============================================================================
+local function addCorner(p, r)
+    local v = Instance.new("UICorner", p)
+    v.CornerRadius = UDim.new(0, r)
+    return v
+end
+
+local function addStroke(p, c, t, tr)
+    local v = Instance.new("UIStroke", p)
+    v.Color = c
+    v.Thickness = t or 1
+    v.Transparency = tr or 0
+    return v
+end
+
+local function createGUI()
+    pcall(function()
+        local old = playerGui:FindFirstChild("UltimateTrader")
+        if old then old:Destroy() end
+    end)
+    pcall(function()
+        local old = game.CoreGui:FindFirstChild("UltimateTrader")
+        if old then old:Destroy() end
+    end)
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "UltimateTrader"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.DisplayOrder = 999
+    
+    if pcall(function() screenGui.Parent = game.CoreGui end) then
+    else
+        screenGui.Parent = playerGui
+    end
+
+    -- ФОН
+    local background = Instance.new("ImageLabel", screenGui)
+    background.Size = UDim2.new(1, 0, 1, 0)
+    background.BackgroundTransparency = 1
+    background.Image = "rbxassetid://" .. BACKGROUND_ID
+    background.ImageTransparency = 0.15
+    background.ScaleType = Enum.ScaleType.Stretch
+    background.ZIndex = 0
+
+    -- ГЛАВНОЕ ОКНО
+    local main = Instance.new("Frame")
+    main.Size = UDim2.new(0, 420, 0, 540)
+    main.Position = UDim2.new(0.5, -210, 0.5, -270)
+    main.AnchorPoint = Vector2.new(0, 0)
+    main.BackgroundColor3 = Color3.fromRGB(10, 18, 40)
+    main.BackgroundTransparency = 0.05
+    main.BorderSizePixel = 0
+    main.ClipsDescendants = true
+    main.Parent = screenGui
+    addCorner(main, 12)
+    
+    local windowBg = Instance.new("ImageLabel", main)
+    windowBg.Size = UDim2.new(1, 0, 1, 0)
+    windowBg.BackgroundTransparency = 1
+    windowBg.Image = "rbxassetid://" .. BACKGROUND_ID
+    windowBg.ImageTransparency = 0.12
+    windowBg.ScaleType = Enum.ScaleType.Stretch
+    addCorner(windowBg, 12)
+
+    addStroke(main, Color3.fromRGB(50, 120, 240), 1.5, 0.2)
+
+    -- ЗАГОЛОВОК
+    local header = Instance.new("Frame", main)
+    header.Size = UDim2.new(1, 0, 0, 44)
+    header.BackgroundColor3 = Color3.fromRGB(8, 20, 58)
+    header.BackgroundTransparency = 0.1
+    header.BorderSizePixel = 0
+    addCorner(header, 12)
+
+    local logo = Instance.new("ImageLabel", header)
+    logo.Size = UDim2.new(0, 28, 0, 28)
+    logo.Position = UDim2.new(0, 8, 0.5, -14)
+    logo.BackgroundTransparency = 1
+    logo.Image = "rbxassetid://" .. BACKGROUND_ID
+    logo.ScaleType = Enum.ScaleType.Fit
+    addCorner(logo, 4)
+
+    local title = Instance.new("TextLabel", header)
+    title.Size = UDim2.new(1, -70, 1, 0)
+    title.Position = UDim2.new(0, 42, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "💰 ULTIMATE TRADER v8.0"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 14
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+
+    local closeBtn = Instance.new("TextButton", header)
+    closeBtn.Size = UDim2.new(0, 30, 0, 30)
+    closeBtn.Position = UDim2.new(1, -38, 0.5, -15)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+    closeBtn.BackgroundTransparency = 0.2
+    closeBtn.Text = "✕"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeBtn.TextSize = 14
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.BorderSizePixel = 0
+    addCorner(closeBtn, 4)
+    closeBtn.MouseButton1Click:Connect(function()
+        screenGui:Destroy()
+    end)
+
+    local minBtn = Instance.new("TextButton", header)
+    minBtn.Size = UDim2.new(0, 30, 0, 30)
+    minBtn.Position = UDim2.new(1, -74, 0.5, -15)
+    minBtn.BackgroundColor3 = Color3.fromRGB(200, 180, 50)
+    minBtn.BackgroundTransparency = 0.2
+    minBtn.Text = "−"
+    minBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minBtn.TextSize = 18
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.BorderSizePixel = 0
+    addCorner(minBtn, 4)
+    local minimized = false
+    minBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        contentContainer.Visible = not minimized
+        minBtn.Text = minimized and "+" or "−"
+    end)
+
+    -- КОНТЕЙНЕР КОНТЕНТА
+    local contentContainer = Instance.new("Frame", main)
+    contentContainer.Size = UDim2.new(1, 0, 1, -44)
+    contentContainer.Position = UDim2.new(0, 0, 0, 44)
+    contentContainer.BackgroundTransparency = 1
+
+    -- ПЕРЕКЛЮЧАТЕЛЬ ВКЛАДОК
+    local tabContainer = Instance.new("Frame", contentContainer)
+    tabContainer.Size = UDim2.new(1, 0, 0, 38)
+    tabContainer.BackgroundColor3 = Color3.fromRGB(8, 20, 58)
+    tabContainer.BackgroundTransparency = 0.3
+    tabContainer.BorderSizePixel = 0
+
+    local tabButtons = {}
+    local tabFrames = {}
+    local tabNames = {"Auto-Buy", "Анализ", "Flipper", "Статистика"}
+
+    for i, name in ipairs(tabNames) do
+        local btn = Instance.new("TextButton", tabContainer)
+        btn.Size = UDim2.new(1/4, 0, 1, 0)
+        btn.Position = UDim2.new((i-1)/4, 0, 0, 0)
+        btn.BackgroundColor3 = (i == 1) and Color3.fromRGB(50, 80, 160) or Color3.fromRGB(20, 40, 80)
+        btn.BackgroundTransparency = (i == 1) and 0.2 or 0.4
+        btn.Text = name
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.TextSize = 10
+        btn.Font = Enum.Font.GothamBold
+        btn.BorderSizePixel = 0
+        tabButtons[i] = btn
+
+        local content = Instance.new("Frame", contentContainer)
+        content.Size = UDim2.new(1, 0, 1, -38)
+        content.Position = UDim2.new(0, 0, 0, 38)
+        content.BackgroundTransparency = 1
+        content.Visible = (i == 1)
+        tabFrames[i] = content
+
+        btn.MouseButton1Click:Connect(function()
+            for j, f in ipairs(tabFrames) do
+                f.Visible = (j == i)
+                tabButtons[j].BackgroundColor3 = (j == i) and Color3.fromRGB(50, 80, 160) or Color3.fromRGB(20, 40, 80)
+                tabButtons[j].BackgroundTransparency = (j == i) and 0.2 or 0.4
+            end
+        end)
+    end
+
+    -- ========================================================================
+    -- СОЗДАНИЕ ЭКЗЕМПЛЯРОВ
+    -- ========================================================================
+    local CoreInstance = Core.new()
+    local AnalyzerInstance = Analyzer.new(CoreInstance)
+    local AutoBuyInstance = AutoBuy.new(CoreInstance, AnalyzerInstance)
+    local FlipperInstance = Flipper.new(CoreInstance, AnalyzerInstance)
+
+    -- ========================================================================
+    -- ВКЛАДКА 1: AUTO-BUY
+    -- ========================================================================
+    local autoBuyTab = tabFrames[1]
+
+    local abTitle = Instance.new("TextLabel", autoBuyTab)
+    abTitle.Size = UDim2.new(1, 0, 0, 26)
+    abTitle.Position = UDim2.new(0, 10, 0, 2)
+    abTitle.BackgroundTransparency = 1
+    abTitle.Text = "🤖 Авто-закуп (Обученный)"
+    abTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+    abTitle.TextSize = 14
+    abTitle.Font = Enum.Font.GothamBold
+    abTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+    -- Переключатель валют
+    local abCurContainer = Instance.new("Frame", autoBuyTab)
+    abCurContainer.Size = UDim2.new(0.5, 0, 0, 30)
+    abCurContainer.Position = UDim2.new(0.5, 0, 0, 2)
+    abCurContainer.BackgroundTransparency = 1
+
+    local currencies = {"_StarsValue", "_GemsValue", "_TONValue"}
+    local symbols = {"⭐", "💎", "💠"}
+    local abCurButtons = {}
+
+    for i, cur in ipairs(currencies) do
+        local btn = Instance.new("TextButton", abCurContainer)
+        btn.Size = UDim2.new(1/3, -4, 1, 0)
+        btn.Position = UDim2.new((i-1)/3, 2, 0, 0)
+        btn.BackgroundColor3 = (i == 1) and Color3.fromRGB(50, 100, 200) or Color3.fromRGB(30, 50, 90)
+        btn.Text = symbols[i]
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.TextSize = 14
+        btn.Font = Enum.Font.GothamBold
+        btn.BorderSizePixel = 0
+        addCorner(btn, 4)
+        btn.MouseButton1Click:Connect(function()
+            local curName = currencies[i]
+            for j, b in ipairs(abCurButtons) do
+                b.BackgroundColor3 = (currencies[j] == curName) and Color3.fromRGB(50, 100, 200) or Color3.fromRGB(30, 50, 90)
+            end
+            CoreInstance.state.currentCurrency = curName
+        end)
+        abCurButtons[i] = btn
+    end
+
+    -- Поля ввода
+    local nameLabel = Instance.new("TextLabel", autoBuyTab)
+    nameLabel.Size = UDim2.new(0, 80, 0, 22)
+    nameLabel.Position = UDim2.new(0, 10, 0, 36)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = "NFT Name:"
+    nameLabel.TextColor3 = Color3.fromRGB(200, 210, 230)
+    nameLabel.TextSize = 11
+    nameLabel.Font = Enum.Font.Gotham
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Right
+
+    local nameBox = Instance.new("TextBox", autoBuyTab)
+    nameBox.Size = UDim2.new(1, -110, 0, 24)
+    nameBox.Position = UDim2.new(0, 100, 0, 35)
+    nameBox.BackgroundColor3 = Color3.fromRGB(8, 20, 58)
+    nameBox.BackgroundTransparency = 0.3
+    nameBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameBox.PlaceholderText = "Введите название NFT..."
+    nameBox.PlaceholderColor3 = Color3.fromRGB(100, 120, 160)
+    nameBox.Text = ""
+    nameBox.Font = Enum.Font.Gotham
+    nameBox.TextSize = 11
+    addCorner(nameBox, 4)
+    addStroke(nameBox, Color3.fromRGB(50, 120, 240), 1, 0.2)
+
+    local priceLabel = Instance.new("TextLabel", autoBuyTab)
+    priceLabel.Size = UDim2.new(0, 80, 0, 22)
+    priceLabel.Position = UDim2.new(0, 10, 0, 66)
+    priceLabel.BackgroundTransparency = 1
+    priceLabel.Text = "Max Price:"
+    priceLabel.TextColor3 = Color3.fromRGB(200, 210, 230)
+    priceLabel.TextSize = 11
+    priceLabel.Font = Enum.Font.Gotham
+    priceLabel.TextXAlignment = Enum.TextXAlignment.Right
+
+    local priceBox = Instance.new("TextBox", autoBuyTab)
+    priceBox.Size = UDim2.new(1, -110, 0, 24)
+    priceBox.Position = UDim2.new(0, 100, 0, 65)
+    priceBox.BackgroundColor3 = Color3.fromRGB(8, 20, 58)
+    priceBox.BackgroundTransparency = 0.3
+    priceBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    priceBox.PlaceholderText = "Введите макс. цену..."
+    priceBox.PlaceholderColor3 = Color3.fromRGB(100, 120, 160)
+    priceBox.Text = ""
+    priceBox.Font = Enum.Font.Gotham
+    priceBox.TextSize = 11
+    addCorner(priceBox, 4)
+    addStroke(priceBox, Color3.fromRGB(50, 120, 240), 1, 0.2)
+
+    -- Статус и статистика
+    local abStatus = Instance.new("TextLabel", autoBuyTab)
+    abStatus.Size = UDim2.new(1, -20, 0, 18)
+    abStatus.Position = UDim2.new(0, 10, 0, 96)
+    abStatus.BackgroundTransparency = 1
+    abStatus.Text = "● Ожидание"
+    abStatus.TextColor3 = Color3.fromRGB(100, 120, 160)
+    abStatus.TextSize = 10
+    abStatus.Font = Enum.Font.Gotham
+
+    local abStats = Instance.new("TextLabel", autoBuyTab)
+    abStats.Size = UDim2.new(1, -20, 0, 16)
+    abStats.Position = UDim2.new(0, 10, 0, 116)
+    abStats.BackgroundTransparency = 1
+    abStats.Text = "Покупок: 0 | Ошибок: 0 | Успех: 0%"
+    abStats.TextColor3 = Color3.fromRGB(80, 100, 140)
+    abStats.TextSize = 9
+    abStats.Font = Enum.Font.Gotham
+
+    -- Кнопка
+    local abStartBtn = Instance.new("TextButton", autoBuyTab)
+    abStartBtn.Size = UDim2.new(0.6, 0, 0, 34)
+    abStartBtn.Position = UDim2.new(0.2, 0, 0, 140)
+    abStartBtn.BackgroundColor3 = Color3.fromRGB(40, 180, 80)
+    abStartBtn.BackgroundTransparency = 0.2
+    abStartBtn.Text = "▶ ЗАПУСТИТЬ"
+    abStartBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    abStartBtn.TextSize = 12
+    abStartBtn.Font = Enum.Font.GothamBold
+    abStartBtn.BorderSizePixel = 0
+    addCorner(abStartBtn, 6)
+    addStroke(abStartBtn, Color3.fromRGB(40, 180, 80), 1, 0.3)
+
+    abStartBtn.MouseButton1Click:Connect(function()
+        if AutoBuyInstance.running then
+            AutoBuyInstance:stop()
+            abStartBtn.Text = "▶ ЗАПУСТИТЬ"
+            abStartBtn.BackgroundColor3 = Color3.fromRGB(40, 180, 80)
+            abStatus.Text = "● Остановлен"
+            abStatus.TextColor3 = Color3.fromRGB(100, 120, 160)
+            return
+        end
+        local name = nameBox.Text
+        local price = tonumber(priceBox.Text)
+        if name == "" or not price or price <= 0 then
+            CoreInstance:notify("Auto-Buy", "Введите корректные данные!")
+            return
+        end
+        AutoBuyInstance:start(name, price, CoreInstance.state.currentCurrency)
+        abStartBtn.Text = "⏹ ОСТАНОВИТЬ"
+        abStartBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+        abStatus.Text = "● Мониторинг..."
+        abStatus.TextColor3 = Color3.fromRGB(40, 200, 80)
+    end)
+
+    -- Обновление статистики
+    RunService.Heartbeat:Connect(function()
+        if AutoBuyInstance.running then
+            local status = AutoBuyInstance:getStatus()
+            abStats.Text = string.format("Покупок: %d | Ошибок: %d | Успех: %d%%", 
+                status.buys, 
+                CoreInstance.state.stats.failedAttempts,
+                math.floor(status.learning.successRate * 100)
+            )
+        end
+    end)
+
+    -- ========================================================================
+    -- ВКЛАДКА 2: АНАЛИЗАТОР
+    -- ========================================================================
+    local analyzerTab = tabFrames[2]
+
+    local anTitle = Instance.new("TextLabel", analyzerTab)
+    anTitle.Size = UDim2.new(1, 0, 0, 26)
+    anTitle.Position = UDim2.new(0, 10, 0, 2)
+    anTitle.BackgroundTransparency = 1
+    anTitle.Text = "📊 Анализатор рынка"
+    anTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+    anTitle.TextSize = 14
+    anTitle.Font = Enum.Font.GothamBold
+    anTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+    local scanBtn = Instance.new("TextButton", analyzerTab)
+    scanBtn.Size = UDim2.new(0, 100, 0, 28)
+    scanBtn.Position = UDim2.new(1, -110, 0, 2)
+    scanBtn.BackgroundColor3 = Color3.fromRGB(40, 100, 200)
+    scanBtn.BackgroundTransparency = 0.2
+    scanBtn.Text = "🔍 Сканировать"
+    scanBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    scanBtn.TextSize = 10
+    scanBtn.Font = Enum.Font.GothamBold
+    scanBtn.BorderSizePixel = 0
+    addCorner(scanBtn, 4)
+    addStroke(scanBtn, Color3.fromRGB(40, 100, 200), 1, 0.3)
+
+    local anScroll = Instance.new("ScrollingFrame", analyzerTab)
+    anScroll.Size = UDim2.new(1, -10, 1, -44)
+    anScroll.Position = UDim2.new(0, 5, 0, 34)
+    anScroll.BackgroundTransparency = 1
+    anScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    anScroll.ScrollBarThickness = 3
+    anScroll.ScrollBarImageColor3 = Color3.fromRGB(50, 120, 240)
+    anScroll.AutomaticCanvasSize = Enum.AutomaticCanvasSize.Y
+
+    local anLayout = Instance.new("UIListLayout", anScroll)
+    anLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    anLayout.Padding = UDim.new(0, 3)
+
+    local function updateAnalyzer()
+        for _, child in pairs(anScroll:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+        
+        local deals = AnalyzerInstance:getDeals(CoreInstance.state.currentCurrency, 20)
+        if #deals == 0 then
+            local empty = Instance.new("TextLabel", anScroll)
+            empty.Size = UDim2.new(1, 0, 0, 50)
+            empty.BackgroundTransparency = 1
+            empty.Text = "📭 Нет данных. Нажмите 'Сканировать'."
+            empty.TextColor3 = Color3.fromRGB(100, 120, 160)
+            empty.TextSize = 12
+            empty.Font = Enum.Font.Gotham
+            return
+        end
+
+        for _, deal in ipairs(deals) do
+            local row = Instance.new("Frame", anScroll)
+            row.Size = UDim2.new(1, 0, 0, 56)
+            row.BackgroundColor3 = Color3.fromRGB(8, 20, 58)
+            row.BackgroundTransparency = 0.3
+            row.BorderSizePixel = 0
+            addCorner(row, 4)
+            addStroke(row, Color3.fromRGB(50, 120, 240), 1, 0.1)
+
+            local info = CoreInstance.cache.gifts[deal.name]
+            local icon = Instance.new("ImageLabel", row)
+            icon.Size = UDim2.new(0, 38, 0, 38)
+            icon.Position = UDim2.new(0, 4, 0.5, -19)
+            icon.BackgroundTransparency = 1
+            icon.Image = info and ("rbxassetid://" .. info.Image) or "rbxasset://textures/ui/Placeholder.png"
+            icon.ScaleType = Enum.ScaleType.Fit
+            addCorner(icon, 2)
+
+            local nameL = Instance.new("TextLabel", row)
+            nameL.Size = UDim2.new(0.25, 0, 0.4, 0)
+            nameL.Position = UDim2.new(0.08, 0, 0.05, 0)
+            nameL.BackgroundTransparency = 1
+            nameL.Text = deal.name
+            nameL.TextColor3 = Color3.fromRGB(255, 255, 255)
+            nameL.TextSize = 10
+            nameL.Font = Enum.Font.GothamBold
+            nameL.TextXAlignment = Enum.TextXAlignment.Left
+
+            local stats = Instance.new("TextLabel", row)
+            stats.Size = UDim2.new(0.45, 0, 0.35, 0)
+            stats.Position = UDim2.new(0.08, 0, 0.45, 0)
+            stats.BackgroundTransparency = 1
+            stats.Text = string.format("Мин: %s  Сред: %s  Макс: %s", 
+                tostring(deal.min), 
+                tostring(math.floor(deal.average)), 
+                tostring(deal.max)
+            )
+            stats.TextColor3 = Color3.fromRGB(160, 180, 210)
+            stats.TextSize = 9
+            stats.Font = Enum.Font.Gotham
+            stats.TextXAlignment = Enum.TextXAlignment.Left
+
+            local trend = Instance.new("TextLabel", row)
+            trend.Size = UDim2.new(0, 50, 0, 18)
+            trend.Position = UDim2.new(0.6, 0, 0.1, 0)
+            trend.BackgroundTransparency = 1
+            trend.Text = deal.trend:upper()
+            trend.TextColor3 = (deal.trend == "rising") and Color3.fromRGB(40, 200, 80) or (deal.trend == "falling") and Color3.fromRGB(200, 60, 60) or Color3.fromRGB(200, 180, 50)
+            trend.TextSize = 9
+            trend.Font = Enum.Font.GothamBold
+
+            local rating = Instance.new("TextLabel", row)
+            rating.Size = UDim2.new(0, 50, 0, 18)
+            rating.Position = UDim2.new(0.6, 0, 0.45, 0)
+            rating.BackgroundTransparency = 1
+            rating.Text = "⭐ " .. math.floor(deal.rating)
+            rating.TextColor3 = Color3.fromRGB(255, 200, 50)
+            rating.TextSize = 9
+            rating.Font = Enum.Font.GothamBold
+
+            local discount = Instance.new("TextLabel", row)
+            discount.Size = UDim2.new(0, 50, 0, 18)
+            discount.Position = UDim2.new(0.72, 0, 0.5, -9)
+            discount.BackgroundTransparency = 1
+            discount.Text = string.format("⬇ %d%%", math.floor(deal.discount * 100))
+            discount.TextColor3 = (deal.discount > 0.3) and Color3.fromRGB(40, 200, 80) or Color3.fromRGB(200, 180, 50)
+            discount.TextSize = 10
+            discount.Font = Enum.Font.GothamBold
+
+            local buyBtn = Instance.new("TextButton", row)
+            buyBtn.Size = UDim2.new(0, 50, 0, 30)
+            buyBtn.Position = UDim2.new(0.82, 0, 0.5, -15)
+            buyBtn.BackgroundColor3 = Color3.fromRGB(40, 180, 80)
+            buyBtn.BackgroundTransparency = 0.2
+            buyBtn.Text = "Купить"
+            buyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            buyBtn.TextSize = 10
+            buyBtn.Font = Enum.Font.GothamBold
+            buyBtn.BorderSizePixel = 0
+            addCorner(buyBtn, 4)
+            addStroke(buyBtn, Color3.fromRGB(40, 180, 80), 1, 0.3)
+
+            local cache = CoreInstance.state.marketCache[CoreInstance.state.currentCurrency]
+            local item = cache and cache[deal.name]
+            buyBtn.MouseButton1Click:Connect(function()
+                if item then
+                    local ok, res = CoreInstance:buyItem(item.ref)
+                    if ok and res and res[1] then
+                        CoreInstance:notify("Анализатор", "Куплен " .. deal.name .. " за " .. tostring(item.value))
+                        updateAnalyzer()
+                    end
+                end
+            end)
+        end
+    end
+
+    scanBtn.MouseButton1Click:Connect(function()
+        scanBtn.Text = "⏳ Сканирование..."
+        scanBtn.BackgroundColor3 = Color3.fromRGB(200, 150, 50)
+        scanBtn.Interactable = false
+        task.spawn(function()
+            AnalyzerInstance:scan()
+            updateAnalyzer()
+            scanBtn.Text = "🔍 Сканировать"
+            scanBtn.BackgroundColor3 = Color3.fromRGB(40, 100, 200)
+            scanBtn.Interactable = true
+            CoreInstance:notify("Анализатор", "Сканирование завершено!")
+        end)
+    end)
+
+    -- ========================================================================
+    -- ВКЛАДКА 3: FLIPPER
+    -- ========================================================================
+    local flipperTab = tabFrames[3]
+
+    local flTitle = Instance.new("TextLabel", flipperTab)
+    flTitle.Size = UDim2.new(1, 0, 0, 26)
+    flTitle.Position = UDim2.new(0, 10, 0, 2)
+    flTitle.BackgroundTransparency = 1
+    flTitle.Text = "🔄 Бот-перекуп (Обученный)"
+    flTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+    flTitle.TextSize = 14
+    flTitle.Font = Enum.Font.GothamBold
+    flTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+    local flCurContainer = Instance.new("Frame", flipperTab)
+    flCurContainer.Size = UDim2.new(0.4, 0, 0, 30)
+    flCurContainer.Position = UDim2.new(0.6, 0, 0, 2)
+    flCurContainer.BackgroundTransparency = 1
+
+    local flCurButtons = {}
+    for i, cur in ipairs(currencies) do
+        local btn = Instance.new("TextButton", flCurContainer)
+        btn.Size = UDim2.new(1/3, -4, 1, 0)
+        btn.Position = UDim2.new((i-1)/3, 2, 0, 0)
+        btn.BackgroundColor3 = (i == 1) and Color3.fromRGB(50, 100, 200) or Color3.fromRGB(30, 50, 90)
+        btn.Text = symbols[i]
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.TextSize = 14
+        btn.Font = Enum.Font.GothamBold
+        btn.BorderSizePixel = 0
+        addCorner(btn, 4)
+        btn.MouseButton1Click:Connect(function()
+            for j, b in ipairs(flCurButtons) do
+                b.BackgroundColor3 = (currencies[j] == currencies[i]) and Color3.fromRGB(50, 100, 200) or Color3.fromRGB(30, 50, 90)
+            end
+        end)
+        flCurButtons[i] = btn
+    end
+
+    local flScroll = Instance.new("ScrollingFrame", flipperTab)
+    flScroll.Size = UDim2.new(1, -10, 1, -100)
+    flScroll.Position = UDim2.new(0, 5, 0, 38)
+    flScroll.BackgroundTransparency = 1
+    flScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    flScroll.ScrollBarThickness = 3
+    flScroll.ScrollBarImageColor3 = Color3.fromRGB(50, 120, 240)
+    flScroll.AutomaticCanvasSize = Enum.AutomaticCanvasSize.Y
+
+    local flLayout = Instance.new("UIListLayout", flScroll)
+    flLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    flLayout.Padding = UDim.new(0, 2)
+
+    local flSettings = {}
+
+    local function buildFlipperList()
+        for _, child in pairs(flScroll:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+        flSettings = {}
+
+        for name, info in pairs(CoreInstance.cache.gifts) do
+            local row = Instance.new("Frame", flScroll)
+            row.Size = UDim2.new(1, 0, 0, 36)
+            row.BackgroundColor3 = Color3.fromRGB(8, 20, 58)
+            row.BackgroundTransparency = 0.3
+            row.BorderSizePixel = 0
+            addCorner(row, 3)
+            addStroke(row, Color3.fromRGB(50, 120, 240), 1, 0.05)
+
+            local icon = Instance.new("ImageLabel", row)
+            icon.Size = UDim2.new(0, 24, 0, 24)
+            icon.Position = UDim2.new(0, 3, 0.5, -12)
+            icon.BackgroundTransparency = 1
+            icon.Image = "rbxassetid://" .. info.Image
+            icon.ScaleType = Enum.ScaleType.Fit
+            addCorner(icon, 2)
+
+            local nameL = Instance.new("TextLabel", row)
+            nameL.Size = UDim2.new(0.28, 0, 1, 0)
+            nameL.Position = UDim2.new(0.07, 0, 0, 0)
+            nameL.BackgroundTransparency = 1
+            nameL.Text = info.DisplayName or name
+            nameL.TextColor3 = Color3.fromRGB(255, 255, 255)
+            nameL.TextSize = 8
+            nameL.Font = Enum.Font.GothamBold
+            nameL.TextXAlignment = Enum.TextXAlignment.Left
+
+            local buyBox = Instance.new("TextBox", row)
+            buyBox.Size = UDim2.new(0.2, 0, 0.7, 0)
+            buyBox.Position = UDim2.new(0.38, 0, 0.15, 0)
+            buyBox.BackgroundColor3 = Color3.fromRGB(8, 20, 58)
+            buyBox.BackgroundTransparency = 0.3
+            buyBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+            buyBox.PlaceholderText = "Купить ≤"
+            buyBox.PlaceholderColor3 = Color3.fromRGB(100, 120, 160)
+            buyBox.Text = ""
+            buyBox.Font = Enum.Font.Gotham
+            buyBox.TextSize = 9
+            addCorner(buyBox, 3)
+            addStroke(buyBox, Color3.fromRGB(50, 120, 240), 1, 0.15)
+
+            local sellBox = Instance.new("TextBox", row)
+            sellBox.Size = UDim2.new(0.2, 0, 0.7, 0)
+            sellBox.Position = UDim2.new(0.62, 0, 0.15, 0)
+            sellBox.BackgroundColor3 = Color3.fromRGB(8, 20, 58)
+            sellBox.BackgroundTransparency = 0.3
+            sellBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+            sellBox.PlaceholderText = "Продать"
+            sellBox.PlaceholderColor3 = Color3.fromRGB(100, 120, 160)
+            sellBox.Text = ""
+            sellBox.Font = Enum.Font.Gotham
+            sellBox.TextSize = 9
+            addCorner(sellBox, 3)
+            addStroke(sellBox, Color3.fromRGB(50, 120, 240), 1, 0.15)
+
+            flSettings[name] = {buyBox = buyBox, sellBox = sellBox}
+        end
+    end
+    buildFlipperList()
+
+    local flStatus = Instance.new("TextLabel", flipperTab)
+    flStatus.Size = UDim2.new(0.55, 0, 0, 18)
+    flStatus.Position = UDim2.new(0, 5, 1, -24)
+    flStatus.BackgroundTransparency = 1
+    flStatus.Text = "● Ожидание"
+    flStatus.TextColor3 = Color3.fromRGB(100, 120, 160)
+    flStatus.TextSize = 9
+    flStatus.Font = Enum.Font.Gotham
+
+    local flProfit = Instance.new("TextLabel", flipperTab)
+    flProfit.Size = UDim2.new(0.4, 0, 0, 18)
+    flProfit.Position = UDim2.new(0.6, 0, 1, -24)
+    flProfit.BackgroundTransparency = 1
+    flProfit.Text = "💰 Прибыль: 0"
+    flProfit.TextColor3 = Color3.fromRGB(40, 200, 80)
+    flProfit.TextSize = 9
+    flProfit.Font = Enum.Font.GothamBold
+    flProfit.TextXAlignment = Enum.TextXAlignment.Right
+
+    local flStartBtn = Instance.new("TextButton", flipperTab)
+    flStartBtn.Size = UDim2.new(0.6, 0, 0, 34)
+    flStartBtn.Position = UDim2.new(0.2, 0, 1, -62)
+    flStartBtn.BackgroundColor3 = Color3.fromRGB(40, 180, 80)
+    flStartBtn.BackgroundTransparency = 0.2
+    flStartBtn.Text = "▶ ЗАПУСТИТЬ БОТА"
+    flStartBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    flStartBtn.TextSize = 11
+    flStartBtn.Font = Enum.Font.GothamBold
+    flStartBtn.BorderSizePixel = 0
+    addCorner(flStartBtn, 6)
+    addStroke(flStartBtn, Color3.fromRGB(40, 180, 80), 1, 0.3)
+
+    flStartBtn.MouseButton1Click:Connect(function()
+        if FlipperInstance.running then
+            FlipperInstance:stop()
+            flStartBtn.Text = "▶ ЗАПУСТИТЬ БОТА"
+            flStartBtn.BackgroundColor3 = Color3.fromRGB(40, 180, 80)
+            flStatus.Text = "● Остановлен"
+            flStatus.TextColor3 = Color3.fromRGB(100, 120, 160)
+            return
+        end
+
+        FlipperInstance.settings = {}
+        for name, data in pairs(flSettings) do
+            local buy = tonumber(data.buyBox.Text)
+            local sell = tonumber(data.sellBox.Text)
+            if buy and sell and buy > 0 and sell > 0 then
+                FlipperInstance:addSettings(name, buy, sell)
+            end
+        end
+
+        if next(FlipperInstance.settings) == nil then
+            CoreInstance:notify("Flipper", "Нет настроек для бота!")
+            return
+        end
+
+        FlipperInstance:start(CoreInstance.state.currentCurrency)
+        flStartBtn.Text = "⏹ ОСТАНОВИТЬ"
+        flStartBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+        flStatus.Text = "● Работает..."
+        flStatus.TextColor3 = Color3.fromRGB(40, 200, 80)
+    end)
+
+    -- Обновление прибыли
+    RunService.Heartbeat:Connect(function()
+        if FlipperInstance.running then
+            local status = FlipperInstance:getStatus()
+            flProfit.Text = "💰 Прибыль: " .. tostring(status.profit) .. " | Успех: " .. math.floor(status.successRate * 100) .. "%"
+        end
+    end)
+
+    -- ========================================================================
+    -- ВКЛАДКА 4: СТАТИСТИКА
+    -- ========================================================================
+    local statsTab = tabFrames[4]
+
+    local stTitle = Instance.new("TextLabel", statsTab)
+    stTitle.Size = UDim2.new(1, 0, 0, 26)
+    stTitle.Position = UDim2.new(0, 10, 0, 2)
+    stTitle.BackgroundTransparency = 1
+    stTitle.Text = "📈 Статистика"
+    stTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+    stTitle.TextSize = 14
+    stTitle.Font = Enum.Font.GothamBold
+    stTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+    local statsScroll = Instance.new("ScrollingFrame", statsTab)
+    statsScroll.Size = UDim2.new(1, -10, 1, -10)
+    statsScroll.Position = UDim2.new(0, 5, 0, 30)
+    statsScroll.BackgroundTransparency = 1
+    statsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    statsScroll.ScrollBarThickness = 3
+    statsScroll.ScrollBarImageColor3 = Color3.fromRGB(50, 120, 240)
+    statsScroll.AutomaticCanvasSize = Enum.AutomaticCanvasSize.Y
+
+    local statsLayout = Instance.new("UIListLayout", statsScroll)
+    statsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    statsLayout.Padding = UDim.new(0, 4)
+
+    local function updateStats()
+        for _, child in pairs(statsScroll:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+
+        local stats = CoreInstance.state.stats
+        local autoBuyStatus = AutoBuyInstance:getStatus()
+        local flipperStatus = FlipperInstance:getStatus()
+
+        local items = {
+            {label = "📊 Общая статистика", value = "", isHeader = true},
+            {label = "Всего покупок", value = tostring(stats.totalBuys)},
+            {label = "Всего продаж", value = tostring(stats.totalSells)},
+            {label = "Прибыль", value = tostring(stats.profit)},
+            {label = "Успешных сделок", value = tostring(stats.successfulTrades)},
+            {label = "Всего сделок", value = tostring(stats.totalTrades)},
+            {label = "Процент успеха", value = stats.totalTrades > 0 and math.floor(stats.successfulTrades / stats.totalTrades * 100) .. "%" or "0%"},
+            {label = "Ошибок", value = tostring(stats.failedAttempts)},
+            {label = "", value = "", isHeader = true},
+            {label = "🤖 Авто-закуп", value = "", isHeader = true},
+            {label = "Статус", value = autoBuyStatus.running and "🟢 Активен" or "🔴 Остановлен"},
+            {label = "Цель", value = autoBuyStatus.target or "Не задана"},
+            {label = "Макс. цена", value = tostring(autoBuyStatus.maxPrice)},
+            {label = "Куплено", value = tostring(autoBuyStatus.buys)},
+            {label = "Успех обучения", value = math.floor(autoBuyStatus.learning.successRate * 100) .. "%"},
+            {label = "", value = "", isHeader = true},
+            {label = "🔄 Бот-перекуп", value = "", isHeader = true},
+            {label = "Статус", value = flipperStatus.running and "🟢 Активен" or "🔴 Остановлен"},
+            {label = "Прибыль", value = tostring(flipperStatus.profit)},
+            {label = "Успех", value = math.floor(flipperStatus.successRate * 100) .. "%"},
+            {label = "Всего сделок", value = tostring(flipperStatus.learningData.totalTrades)},
+            {label = "", value = "", isHeader = true},
+            {label = "⏱ Время работы", value = os.date("%H:%M:%S", os.time() - stats.startTime)},
+        }
+
+        for _, item in ipairs(items) do
+            local row = Instance.new("Frame", statsScroll)
+            row.Size = UDim2.new(1, 0, 0, 26)
+            row.BackgroundColor3 = item.isHeader and Color3.fromRGB(20, 40, 80) or Color3.fromRGB(8, 20, 58)
+            row.BackgroundTransparency = item.isHeader and 0.2 or 0.3
+            row.BorderSizePixel = 0
+            addCorner(row, 3)
+
+            local label = Instance.new("TextLabel", row)
+            label.Size = UDim2.new(0.5, 0, 1, 0)
+            label.Position = UDim2.new(0, 5, 0, 0)
+            label.BackgroundTransparency = 1
+            label.Text = item.label
+            label.TextColor3 = item.isHeader and Color3.fromRGB(255, 220, 100) or Color3.fromRGB(200, 210, 230)
+            label.TextSize = item.isHeader and 12 or 10
+            label.Font = item.isHeader and Enum.Font.GothamBold or Enum.Font.Gotham
+            label.TextXAlignment = Enum.TextXAlignment.Left
+
+            local value = Instance.new("TextLabel", row)
+            value.Size = UDim2.new(0.5, 0, 1, 0)
+            value.Position = UDim2.new(0.5, 0, 0, 0)
+            value.BackgroundTransparency = 1
+            value.Text = item.value
+            value.TextColor3 = item.isHeader and Color3.fromRGB(255, 220, 100) or Color3.fromRGB(255, 255, 255)
+            value.TextSize = item.isHeader and 12 or 10
+            value.Font = item.isHeader and Enum.Font.GothamBold or Enum.Font.Gotham
+            value.TextXAlignment = Enum.TextXAlignment.Right
+        end
+    end
+
+    updateStats()
+
+    local refreshBtn = Instance.new("TextButton", statsTab)
+    refreshBtn.Size = UDim2.new(0, 80, 0, 26)
+    refreshBtn.Position = UDim2.new(1, -90, 0, 2)
+    refreshBtn.BackgroundColor3 = Color3.fromRGB(40, 100, 200)
+    refreshBtn.BackgroundTransparency = 0.2
+    refreshBtn.Text = "🔄 Обновить"
+    refreshBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    refreshBtn.TextSize = 10
+    refreshBtn.Font = Enum.Font.GothamBold
+    refreshBtn.BorderSizePixel = 0
+    addCorner(refreshBtn, 4)
+    addStroke(refreshBtn, Color3.fromRGB(40, 100, 200), 1, 0.3)
+
+    refreshBtn.MouseButton1Click:Connect(updateStats)
+
+    -- ========================================================================
+    -- ДРАГ (перетаскивание окна)
+    -- ========================================================================
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+
+    header.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = main.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+
+    return screenGui
+end
+
+-- ============================================================================
+-- КНОПКА ЗАПУСКА
+-- ============================================================================
+local function createMainButton()
+    pcall(function()
+        local old = game.CoreGui:FindFirstChild("TraderButton")
+        if old then old:Destroy() end
+    end)
+    pcall(function()
+        local old = playerGui:FindFirstChild("TraderButton")
+        if old then old:Destroy() end
+    end)
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 44, 0, 44)
+    btn.Position = UDim2.new(0, 5, 0, 60)
+    btn.BackgroundColor3 = Color3.fromRGB(8, 20, 58)
+    btn.BackgroundTransparency = 0.05
+    btn.Text = "💰"
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 20
+    btn.Font = Enum.Font.GothamBold
+    btn.BorderSizePixel = 0
+    btn.ZIndex = 999
+    btn.Name = "TraderButton"
+    btn.ClipsDescendants = true
+    
+    addCorner(btn, 0)
+    addStroke(btn, Color3.fromRGB(50, 120, 240), 2, 0.3)
+    
+    local parent = pcall(function() return game.CoreGui end) and game.CoreGui or playerGui
+    btn.Parent = parent
+    
+    local guiRef = nil
+    btn.MouseButton1Click:Connect(function()
+        if guiRef and guiRef.Parent then
+            guiRef:Destroy()
+            guiRef = nil
+        else
+            guiRef = createGUI()
+        end
+    end)
+end
+
+-- ============================================================================
+-- ЗАПУСК
+-- ============================================================================
+task.spawn(function()
+    task.wait(1)
+    createMainButton()
+    print("✅ Ultimate Trader v8.0 загружен!")
+    print("📌 Нажми на кнопку 💰 в левом верхнем углу")
+    print("📊 Таблицы данных созданы и сохраняются в инжекторе")
+end)
+
+return {
+    Core = Core,
+    AutoBuy = AutoBuy,
+    Flipper = Flipper,
+    Analyzer = Analyzer,
+    DataTables = DataTables,
+    Icon = BACKGROUND_ID
+}
